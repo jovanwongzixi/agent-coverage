@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Coverage Atlas</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <h1>Coverage Atlas</h1>
+        </div>
+
+        <div class="loadout">
+          <div class="control-card">
+            <div class="control-row">
+              <button id="pickRepoButton" class="primary-button" type="button">Repo</button>
+              <button id="fallbackRepoButton" class="secondary-button" type="button">Upload</button>
+            </div>
+            <p id="repoStatus" class="status-text">No repo</p>
+            <input id="repoDirectoryInput" type="file" webkitdirectory multiple hidden>
+          </div>
+
+          <div class="control-card">
+            <div class="control-row">
+              <button id="pickCoverageButton" class="primary-button" type="button">Coverage</button>
+            </div>
+            <p id="coverageStatus" class="status-text">No coverage</p>
+            <input id="coverageInput" type="file" accept=".json,application/json" hidden>
+          </div>
+        </div>
+      </header>
+
+      <section class="panel treemap-panel">
+        <div id="treemapStage" class="treemap-stage">
+          <div id="treemapEmptyState" class="empty-state">Load repo + coverage</div>
+        </div>
+      </section>
+
+      <main id="workspace" class="workspace">
+        <aside class="panel tasks-panel">
+          <div class="panel-header">
+            <h2>Tasks</h2>
+            <p id="taskSelectionSummary" class="panel-summary">No coverage</p>
+          </div>
+
+          <div class="toolbar">
+            <input id="taskSearchInput" class="search-input" type="search" placeholder="Filter tasks">
+          </div>
+
+          <div id="taskList" class="task-list empty-state">
+            No tasks
+          </div>
+        </aside>
+
+        <section class="panel browser-panel">
+          <div class="panel-header">
+            <h2>Files</h2>
+            <div class="panel-actions">
+              <button id="toggleSidebarButton" class="secondary-button" type="button" aria-expanded="true">
+                Hide Detail
+              </button>
+            </div>
+          </div>
+
+          <div class="browser-grid">
+            <nav class="file-panel">
+              <div class="file-panel-header">
+                <input id="fileSearchInput" class="search-input" type="search" placeholder="Filter files">
+              </div>
+              <div id="fileTree" class="file-tree empty-state">
+                Load repo + coverage
+              </div>
+            </nav>
+
+            <section class="code-panel">
+              <div class="code-header">
+                <h3 id="currentFilePath">-</h3>
+                <p id="currentFileMeta" class="panel-summary">Select a file</p>
+              </div>
+              <div id="codeView" class="code-view empty-state">
+                No file
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <aside class="panel inspector-panel">
+          <div class="panel-header">
+            <h2>Detail</h2>
+          </div>
+          <div id="inspectorContent" class="inspector-content empty-state">
+            Select a file or line
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
