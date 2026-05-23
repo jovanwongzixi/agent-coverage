@@ -740,21 +740,34 @@ def _extract_claude_reasoning_summary(content: object) -> Optional[str]:
 
 
 def _export_opencode_session(session_id: str) -> dict:
-    """Exports an opencode session via the CLI."""
+    """Exports an opencode session via the CLI into a temp file."""
+    fd, tmp_path = tempfile.mkstemp(suffix='.json', prefix='opencode_export_')
+    os.close(fd)
+
     cmd = [_opencode_bin(), "export", session_id]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        with open(tmp_path, 'w') as outfile:
+            subprocess.run(
+                cmd, check=True, stdout=outfile, stderr=subprocess.PIPE, text=True,
+            )
     except FileNotFoundError as exc:
+        os.unlink(tmp_path)
         raise RuntimeError(
             f"opencode binary not found at {_opencode_bin()!r}. "
             "Install opencode or set OPENCODE_BIN."
         ) from exc
     except subprocess.CalledProcessError as exc:
-        details = (exc.stderr or exc.stdout or "").strip()
+        details = (exc.stderr or "").strip()
+        os.unlink(tmp_path)
         if details:
             raise RuntimeError(f"opencode export failed: {details}") from exc
         raise RuntimeError(f"opencode export for {session_id} failed") from exc
-    return json.loads(result.stdout)
+
+    try:
+        with open(tmp_path, 'r') as infile:
+            return json.load(infile)
+    finally:
+        os.unlink(tmp_path)
 
 
 def _extract_opencode_subagent_id(tool_output: str) -> Optional[str]:
