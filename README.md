@@ -4,7 +4,7 @@
 
 This repo does two things:
 
-1. `main.py` parses a Codex or Claude Code session into file/line coverage.
+1. `main.py` parses a Codex, Claude Code, or Pi session into file/line coverage.
 2. `frontend/` is a static viewer for exploring that coverage against a local repo checkout.
 
 The output is a task tree with command-level coverage entries shaped like `path:start:end`.
@@ -34,12 +34,26 @@ this project turns that session history into structured JSON so you can answer:
 Requirements:
 
 - Python 3
-- `codex` CLI installed if the session includes commands the local parser cannot resolve on its own
+- `codex` CLI installed if a Codex/Claude session includes commands the local parser cannot resolve on its own
+- `pi` CLI installed if a Pi session includes commands the local parser cannot resolve on its own
 
 Run it on a session file:
 
 ```sh
 python main.py --session-file /path/to/session.jsonl
+```
+
+Pi sessions are typically stored under:
+
+```sh
+~/.pi/agent/sessions/
+```
+
+Example:
+
+```sh
+python main.py \
+  --session-file ~/.pi/agent/sessions/<project>/<timestamp>_<session-id>.jsonl
 ```
 
 Or resolve a saved session by id:
@@ -48,12 +62,20 @@ Or resolve a saved session by id:
 python main.py --session-id abc123
 ```
 
+For Pi, the session id is the UUID-like suffix in the filename, for example:
+
+```text
+2026-05-23T07-16-10-539Z_019e53b1-04ab-7f65-999d-8c8f0d439ecb.jsonl
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
 By default the script writes `coverage_by_request.json` in the current directory.
 
 Session id lookup checks:
 
 - `~/.codex/sessions`
 - `~/.claude/projects`
+- `~/.pi/agent/sessions`
 
 ## Frontend Usage
 
@@ -74,7 +96,8 @@ The frontend is plain HTML/CSS/JS. No build step.
 ## Notes
 
 - The parser handles a useful subset of shell reads directly, including `sed -n 'start,endp' file` and `nl -ba file | sed -n ...`.
-- When a command cannot be resolved deterministically, `main.py` falls back to `codex exec` to fill in missing ranges and then validates the result.
+- For Pi sessions, `bash` tool calls are recorded directly and `read` tool calls are converted into synthetic `sed -n 'start,endp' path` commands using the tool call's `path`, `offset`, and `limit` arguments.
+- When a command cannot be resolved deterministically, `main.py` falls back to `codex exec` for Codex/Claude sessions, and to headless `pi -p` for Pi sessions, then validates the result.
 - The frontend works best in Chromium-based browsers because it uses the directory picker API when available.
 
 For UI details and the accepted JSON shapes, see [`frontend/README.md`](/home/nine/Documents/agent-coverage/repo/frontend/README.md).
