@@ -543,6 +543,13 @@ def _detect_session_format(session_data: list[dict]) -> str:
             'last-prompt',
         }:
             return 'claude'
+        if event_type in {'session', 'model_change', 'thinking_level_change'}:
+            return 'pi'
+        if event_type == 'message':
+            message = data.get('message', {})
+            role = message.get('role') if isinstance(message, dict) else None
+            if role in {'user', 'assistant', 'toolResult'}:
+                return 'pi'
     raise ValueError('Unsupported session format.')
 
 
@@ -998,6 +1005,21 @@ def _extract_claude_message_text(content: object) -> Optional[str]:
     return '\n'.join(texts)
 
 
+def _extract_pi_request_text(data: dict) -> Optional[str]:
+    """Extracts a real user request from a Pi session event."""
+    if data.get('type') != 'message':
+        return None
+
+    message = data.get('message', {})
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return None
+
+    text = _extract_claude_message_text(message.get('content'))
+    if not text:
+        return None
+    return text
+
+
 def _extract_claude_request_text(data: dict) -> Optional[str]:
     """Extracts a real user request from a Claude Code event."""
     if data.get('type') != 'user' or data.get('isMeta'):
@@ -1312,13 +1334,162 @@ def _parse_claude_session_file_step(
     return _compact_task_tree(parsed_requests)
 
 
+def _extract_pi_reasoning_summary(content: object) -> Optional[str]:
+    """Extracts visible reasoning text from a Pi assistant message when available."""
+    if not isinstance(content, list):
+        return None
+
+    texts = [
+        item.get('thinking', '').strip()
+        for item in content
+        if isinstance(item, dict)
+        and item.get('type') == 'thinking'
+        and item.get('thinking', '').strip()
+    ]
+    if not texts:
+        return None
+    return '\n\n'.join(texts)
+
+
+def _iter_pi_tool_calls(data: dict) -> list[dict]:
+    """Returns Pi toolCall content entries from an assistant message."""
+    if data.get('type') != 'message':
+        return []
+
+    message = data.get('message', {})
+    if not isinstance(message, dict) or message.get('role') != 'assistant':
+        return []
+
+    content = message.get('content', [])
+    if not isinstance(content, list):
+        return []
+
+    return [
+        item
+        for item in content
+        if isinstance(item, dict) and item.get('type') == 'toolCall'
+    ]
+
+
+def _synthesize_pi_read_command(
+    tool_arguments: dict,
+    repo_root_cache: dict[str, Optional[str]],
+    *,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
+    """Converts a Pi read tool call into a shell-like file read command."""
+    file_path = tool_arguments.get('path')
+    if not isinstance(file_path, str) or not file_path:
+        return None
+
+    start_line = tool_arguments.get('offset')
+    if not isinstance(start_line, int) or start_line < 1:
+        start_line = 1
+
+    num_lines = tool_arguments.get('limit')
+    if not isinstance(num_lines, int) or num_lines < 1:
+        num_lines = 200
+
+    end_line = start_line + num_lines - 1
+    normalized_path = _normalize_output_path(
+        file_path,
+        repo_root_cache,
+        cwd=cwd,
+    )
+    return f"sed -n '{start_line},{end_line}p' {shlex.quote(normalized_path)}"
+
+
+def _parse_pi_session_file_step(
+    session_data: list[dict]
+) -> list[SessionTaskNode]:
+    """Parses a Pi session file into structured request nodes."""
+    request_markers: list[tuple[int, str]] = []
+    for idx, data in enumerate(session_data):
+        request = _extract_pi_request_text(data)
+        if request is None:
+            continue
+        if request_markers and request_markers[-1][1] == request and idx - request_markers[-1][0] <= 2:
+            continue
+        request_markers.append((idx, request))
+
+    if not request_markers:
+        request_markers.append((-1, ''))
+
+    parsed_requests: list[SessionTaskNode] = []
+    for marker_idx, (request_idx, request_text) in enumerate(request_markers):
+        next_request_idx = (
+            request_markers[marker_idx + 1][0]
+            if marker_idx + 1 < len(request_markers)
+            else len(session_data)
+        )
+        request_prompt = request_text.strip()
+
+        request_node = SessionTaskNode(kind='user', prompt=request_prompt)
+        last_output_node = request_node
+        repo_root_cache: dict[str, Optional[str]] = {}
+
+        for data in session_data[request_idx + 1:next_request_idx]:
+            cwd = data.get('cwd')
+            current_cwd = cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
+
+            if data.get('type') != 'message':
+                continue
+
+            message = data.get('message', {})
+            if not isinstance(message, dict):
+                continue
+
+            if message.get('role') == 'assistant':
+                commentary_text = _extract_claude_message_text(message.get('content'))
+                if commentary_text:
+                    commentary_node = _append_or_reuse_child(
+                        request_node,
+                        kind='commentary',
+                        prompt=commentary_text,
+                    )
+                    last_output_node = commentary_node
+
+                reasoning_summary = _extract_pi_reasoning_summary(message.get('content'))
+                if reasoning_summary:
+                    _append_or_reuse_child(
+                        request_node,
+                        kind='thinking',
+                        prompt=reasoning_summary,
+                    )
+
+                for tool_call in _iter_pi_tool_calls(data):
+                    tool_name = tool_call.get('name')
+                    tool_arguments = tool_call.get('arguments', {})
+                    if not isinstance(tool_arguments, dict):
+                        tool_arguments = {}
+
+                    if tool_name == 'bash':
+                        command = tool_arguments.get('command')
+                        if isinstance(command, str) and command:
+                            _append_command_node(last_output_node, command)
+                    elif tool_name == 'read':
+                        command = _synthesize_pi_read_command(
+                            tool_arguments,
+                            repo_root_cache,
+                            cwd=current_cwd,
+                        )
+                        if command:
+                            _append_command_node(last_output_node, command)
+
+        parsed_requests.append(request_node)
+
+    return _compact_task_tree(parsed_requests)
+
+
 def parse_session_file_step(session_file_path: str) -> list[SessionTaskNode]:
     """Parses a session file into structured task nodes."""
     session_data = _load_session_data(session_file_path)
     session_format = _detect_session_format(session_data)
     if session_format == 'codex':
         return _parse_codex_session_file_step(session_data)
-    return _parse_claude_session_file_step(session_data)
+    if session_format == 'claude':
+        return _parse_claude_session_file_step(session_data)
+    return _parse_pi_session_file_step(session_data)
 
 
 def session_id_to_session_file(session_id: str) -> Optional[str]:
@@ -1326,6 +1497,7 @@ def session_id_to_session_file(session_id: str) -> Optional[str]:
     session_roots = [
         os.path.expanduser('~/.codex/sessions'),
         os.path.expanduser('~/.claude/projects'),
+        os.path.expanduser('~/.pi/agent/sessions'),
     ]
     for sessions_root in session_roots:
         if not os.path.isdir(sessions_root):
@@ -1416,6 +1588,41 @@ def _run_codex_coverage_update(tmpdirname: str, validation_error: Optional[str] 
         if details:
             raise RuntimeError(f"codex exec failed: {details}") from exc
         raise RuntimeError("codex exec failed without stderr output") from exc
+
+
+def _run_pi_coverage_update(tmpdirname: str, validation_error: Optional[str] = None) -> None:
+    """Asks Pi in headless mode to update coverage.json in the temporary directory."""
+    pi_cmd = [
+        "pi",
+        "-p",
+        _build_codex_prompt(validation_error),
+    ]
+
+    try:
+        subprocess.run(
+            pi_cmd,
+            check=True,
+            cwd=tmpdirname,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or exc.stdout or "").strip()
+        if details:
+            raise RuntimeError(f"pi -p failed: {details}") from exc
+        raise RuntimeError("pi -p failed without stderr output") from exc
+
+
+def _run_coverage_update(
+    tmpdirname: str,
+    fallback_agent: str,
+    validation_error: Optional[str] = None,
+) -> None:
+    """Runs the configured fallback agent to update coverage.json."""
+    if fallback_agent == 'pi':
+        _run_pi_coverage_update(tmpdirname, validation_error)
+        return
+    _run_codex_coverage_update(tmpdirname, validation_error)
 
 
 def _format_json_decode_error(exc: json.JSONDecodeError) -> str:
@@ -1583,7 +1790,10 @@ def _load_and_validate_coverage_file(
     return _normalize_coverage_data(_validate_coverage_data(updated_coverage, commands))
 
 
-def _commands_chunk_to_coverage(commands: list[str]) -> list[dict[str, list[str]]]:
+def _commands_chunk_to_coverage(
+    commands: list[str],
+    fallback_agent: str = 'codex',
+) -> list[dict[str, list[str]]]:
     """
     Given a bounded list of commands, returns the generated coverage entries.
 
@@ -1627,7 +1837,7 @@ def _commands_chunk_to_coverage(commands: list[str]) -> list[dict[str, list[str]
 
         validation_error: Optional[str] = None
         for attempt in range(MAX_COVERAGE_FIX_ATTEMPTS + 1):
-            _run_codex_coverage_update(tmpdirname, validation_error)
+            _run_coverage_update(tmpdirname, fallback_agent, validation_error)
             try:
                 generated_coverage = _load_and_validate_coverage_file(
                     coverage_file_path, unresolved_commands
@@ -1649,7 +1859,10 @@ def _commands_chunk_to_coverage(commands: list[str]) -> list[dict[str, list[str]
     raise AssertionError("unreachable")
 
 
-def commands_to_coverage(commands: list[str]) -> list[dict[str, list[str]]]:
+def commands_to_coverage(
+    commands: list[str],
+    fallback_agent: str = 'codex',
+) -> list[dict[str, list[str]]]:
     """Generates coverage entries for a command list, chunking large batches."""
     if not commands:
         return []
@@ -1657,7 +1870,7 @@ def commands_to_coverage(commands: list[str]) -> list[dict[str, list[str]]]:
     coverage: list[dict[str, list[str]]] = []
     for chunk_start in range(0, len(commands), MAX_COMMANDS_PER_COVERAGE_CHUNK):
         chunk = commands[chunk_start:chunk_start + MAX_COMMANDS_PER_COVERAGE_CHUNK]
-        coverage.extend(_commands_chunk_to_coverage(chunk))
+        coverage.extend(_commands_chunk_to_coverage(chunk, fallback_agent))
 
     return coverage
 
@@ -1671,7 +1884,10 @@ def _walk_task_nodes(task_nodes: list[SessionTaskNode]) -> list[SessionTaskNode]
     return flattened
 
 
-def task_tree_to_coverage(task_nodes: list[SessionTaskNode]) -> dict[str, object]:
+def task_tree_to_coverage(
+    task_nodes: list[SessionTaskNode],
+    fallback_agent: str = 'codex',
+) -> dict[str, object]:
     """Generates hierarchical coverage while reusing repeated command results."""
     if not task_nodes:
         return {'format': 'hierarchical-v1', 'tasks': []}
@@ -1683,7 +1899,7 @@ def task_tree_to_coverage(task_nodes: list[SessionTaskNode]) -> dict[str, object
             if cmd not in unique_commands:
                 unique_commands.append(cmd)
 
-    unique_coverage = commands_to_coverage(unique_commands)
+    unique_coverage = commands_to_coverage(unique_commands, fallback_agent)
     ranges_by_command = {
         entry["cmd"]: list(entry["ranges"])
         for entry in unique_coverage
@@ -1711,18 +1927,30 @@ def task_tree_to_coverage(task_nodes: list[SessionTaskNode]) -> dict[str, object
         'tasks': [node_to_coverage(node) for node in task_nodes],
     }
 
+def _session_file_fallback_agent(session_file_path: str) -> str:
+    """Returns which agent should handle unresolved command coverage."""
+    session_data = _load_session_data(session_file_path)
+    session_format = _detect_session_format(session_data)
+    if session_format == 'pi':
+        return 'pi'
+    return 'codex'
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     task_nodes: list[SessionTaskNode] = []
+    fallback_agent = 'codex'
     if args.session_file:
+        fallback_agent = _session_file_fallback_agent(args.session_file)
         task_nodes = parse_session_file(args.session_file)
 
     if args.session_id:
         session_file = session_id_to_session_file(args.session_id)
         if session_file is None:
             return {'format': 'hierarchical-v1', 'tasks': []}
+        fallback_agent = _session_file_fallback_agent(session_file)
         task_nodes = parse_session_file(session_file)
 
-    coverage = task_tree_to_coverage(task_nodes)
+    coverage = task_tree_to_coverage(task_nodes, fallback_agent)
 
     if args.output_file:
         with open(args.output_file, 'w') as f:
