@@ -21,7 +21,7 @@ SHELL_VAR_RE = re.compile(
 )
 
 
-codex_prompt = (
+coverage_prompt = (
     "The current working directory contains exactly one file, "
     "coverage.json. Update that file in place.\n"
     "coverage.json contains a JSON array of objects shaped like "
@@ -1371,13 +1371,38 @@ def parse_session_file(session_file_path: str) -> list[SessionTaskNode]:
     return load_task_nodes(session_file_path)
 
 
-def _build_codex_prompt(validation_error: Optional[str] = None) -> str:
+_OPENCODE_BIN: Optional[str] = None
+
+
+def _opencode_bin() -> str:
+    """Returns the path to the opencode binary."""
+    global _OPENCODE_BIN
+    if _OPENCODE_BIN is None:
+        _OPENCODE_BIN = os.environ.get('OPENCODE_BIN', 'opencode')
+    return _OPENCODE_BIN
+
+
+_OPENCODE_DB_PATH: Optional[str] = None
+
+
+def _opencode_db_path() -> str:
+    """Returns the path to the opencode SQLite database."""
+    global _OPENCODE_DB_PATH
+    if _OPENCODE_DB_PATH is None:
+        _OPENCODE_DB_PATH = os.environ.get(
+            'OPENCODE_DB_PATH',
+            os.path.expanduser('~/.local/share/opencode/opencode.db'),
+        )
+    return _OPENCODE_DB_PATH
+
+
+def _build_coverage_prompt(validation_error: Optional[str] = None) -> str:
     """Builds the prompt used to update coverage.json."""
     if validation_error is None:
-        return codex_prompt
+        return coverage_prompt
 
     return (
-        f"{codex_prompt}\n"
+        f"{coverage_prompt}\n"
         "The previous attempt was invalid.\n"
         f"Validation error: {validation_error}\n"
         "Fix coverage.json in place and satisfy every requirement above. "
@@ -1385,27 +1410,24 @@ def _build_codex_prompt(validation_error: Optional[str] = None) -> str:
     )
 
 
-def _run_codex_coverage_update(tmpdirname: str, validation_error: Optional[str] = None) -> None:
-    """Asks Codex to update coverage.json in the temporary directory."""
-    codex_cmd = [
-        "codex",
-        "exec",
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "--sandbox",
-        "workspace-write",
-        "--cd",
+def _run_opencode_coverage_update(tmpdirname: str, validation_error: Optional[str] = None) -> None:
+    """Asks opencode to update coverage.json in the temporary directory."""
+    opencode_cmd = [
+        _opencode_bin(),
+        "run",
+        _build_coverage_prompt(validation_error),
+        "--format",
+        "json",
+        "--agent",
+        "plan",
+        "--dir",
         tmpdirname,
-        "--model",
-        "gpt-5.3-codex",
-        "-c",
-        'model_reasoning_effort="medium"',
-        _build_codex_prompt(validation_error),
+        "--dangerously-skip-permissions",
     ]
 
     try:
         subprocess.run(
-            codex_cmd,
+            opencode_cmd,
             check=True,
             cwd=tmpdirname,
             capture_output=True,
@@ -1414,8 +1436,8 @@ def _run_codex_coverage_update(tmpdirname: str, validation_error: Optional[str] 
     except subprocess.CalledProcessError as exc:
         details = (exc.stderr or exc.stdout or "").strip()
         if details:
-            raise RuntimeError(f"codex exec failed: {details}") from exc
-        raise RuntimeError("codex exec failed without stderr output") from exc
+            raise RuntimeError(f"opencode run failed: {details}") from exc
+        raise RuntimeError("opencode run failed without stderr output") from exc
 
 
 def _format_json_decode_error(exc: json.JSONDecodeError) -> str:
@@ -1627,7 +1649,7 @@ def _commands_chunk_to_coverage(commands: list[str]) -> list[dict[str, list[str]
 
         validation_error: Optional[str] = None
         for attempt in range(MAX_COVERAGE_FIX_ATTEMPTS + 1):
-            _run_codex_coverage_update(tmpdirname, validation_error)
+            _run_opencode_coverage_update(tmpdirname, validation_error)
             try:
                 generated_coverage = _load_and_validate_coverage_file(
                     coverage_file_path, unresolved_commands
