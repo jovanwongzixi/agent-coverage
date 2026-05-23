@@ -744,6 +744,11 @@ def _export_opencode_session(session_id: str) -> dict:
     cmd = [_opencode_bin(), "export", session_id]
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"opencode binary not found at {_opencode_bin()!r}. "
+            "Install opencode or set OPENCODE_BIN."
+        ) from exc
     except subprocess.CalledProcessError as exc:
         details = (exc.stderr or exc.stdout or "").strip()
         if details:
@@ -1545,6 +1550,11 @@ def _parse_claude_session_file_step(
 
 def parse_session_file_step(session_file_path: str) -> list[SessionTaskNode]:
     """Parses a session file into structured task nodes."""
+    if session_file_path.startswith('opencode://'):
+        session_id = session_file_path[len('opencode://'):]
+        session_data = _export_opencode_session(session_id)
+        return _parse_opencode_session_file_step(session_data)
+
     session_data = _load_session_data(session_file_path)
     session_format = _detect_session_format(session_data)
     if session_format == 'codex':
@@ -1554,6 +1564,9 @@ def parse_session_file_step(session_file_path: str) -> list[SessionTaskNode]:
 
 def session_id_to_session_file(session_id: str) -> Optional[str]:
     """Given a session ID, returns the path to the session file."""
+    if session_id.startswith('ses_'):
+        return f"opencode://{session_id}"
+
     session_roots = [
         os.path.expanduser('~/.codex/sessions'),
         os.path.expanduser('~/.claude/projects'),
@@ -1664,6 +1677,11 @@ def _run_opencode_coverage_update(tmpdirname: str, validation_error: Optional[st
             capture_output=True,
             text=True,
         )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"opencode binary not found at {_opencode_bin()!r}. "
+            "Install opencode or set OPENCODE_BIN."
+        ) from exc
     except subprocess.CalledProcessError as exc:
         details = (exc.stderr or exc.stdout or "").strip()
         if details:
