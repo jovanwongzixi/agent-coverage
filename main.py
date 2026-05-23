@@ -2013,7 +2013,8 @@ def main() -> None:
                        help='Path to the otter agent file')
     group.add_argument('--session-id', type=str,
                        help='Session ID of the session to parse')
-    group.add_argument('--output-file', type=str, default='coverage_by_request.json',
+
+    parser.add_argument('--output-file', type=str, default='coverage_by_request.json',
                        help='Path to the output coverage file')
 
     args = parser.parse_args()
