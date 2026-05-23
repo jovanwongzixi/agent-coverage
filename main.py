@@ -1676,7 +1676,7 @@ def _run_opencode_coverage_update(tmpdirname: str, validation_error: Optional[st
         "--format",
         "json",
         "--agent",
-        "plan",
+        "build",
         "--dir",
         tmpdirname,
         "--dangerously-skip-permissions",
