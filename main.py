@@ -739,6 +739,237 @@ def _extract_claude_reasoning_summary(content: object) -> Optional[str]:
     return '\n\n'.join(texts)
 
 
+def _export_opencode_session(session_id: str) -> dict:
+    """Exports an opencode session via the CLI."""
+    cmd = [_opencode_bin(), "export", session_id]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or exc.stdout or "").strip()
+        if details:
+            raise RuntimeError(f"opencode export failed: {details}") from exc
+        raise RuntimeError(f"opencode export for {session_id} failed") from exc
+    return json.loads(result.stdout)
+
+
+def _extract_opencode_subagent_id(tool_output: str) -> Optional[str]:
+    """Extracts a subagent session ID from a task tool's output."""
+    match = re.search(r'task_id:\s*(ses_\w+)', tool_output)
+    return match.group(1) if match else None
+
+
+def _extract_opencode_checklist_items(tool_input: dict) -> list[ChecklistItem]:
+    """Extracts checklist items from a todowrite tool's input."""
+    todos = tool_input.get('todos', [])
+    if not isinstance(todos, list):
+        return []
+
+    checklist: list[ChecklistItem] = []
+    for item in todos:
+        if not isinstance(item, dict):
+            continue
+        content = item.get('content')
+        status = item.get('status', 'pending')
+        if isinstance(content, str) and content.strip() and isinstance(status, str) and status.strip():
+            checklist.append(ChecklistItem(step=content.strip(), status=status.strip()))
+    return checklist
+
+
+def _synthesize_opencode_read_command(
+    tool_input: dict,
+    repo_root_cache: dict[str, Optional[str]],
+    *,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
+    """Converts an opencode Read tool call into a shell-like file read command."""
+    file_path = tool_input.get('filePath')
+    if not isinstance(file_path, str) or not file_path:
+        return None
+
+    offset = tool_input.get('offset', 1)
+    limit = tool_input.get('limit', 200)
+    if not isinstance(offset, int) or offset < 1:
+        offset = 1
+    if not isinstance(limit, int) or limit < 1:
+        limit = 200
+
+    end_line = offset + limit - 1
+    normalized_path = _normalize_output_path(file_path, repo_root_cache, cwd=cwd)
+    return f"sed -n '{offset},{end_line}p' {shlex.quote(normalized_path)}"
+
+
+def _synthesize_opencode_grep_command(
+    tool_input: dict,
+    repo_root_cache: dict[str, Optional[str]],
+    *,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
+    """Converts an opencode Grep tool call into a shell-like grep command."""
+    pattern = tool_input.get('pattern')
+    path = tool_input.get('path')
+    if not isinstance(pattern, str) or not pattern or not isinstance(path, str) or not path:
+        return None
+
+    parts = ['rg', '-n']
+    include = tool_input.get('include')
+    if isinstance(include, str) and include:
+        parts.extend(['-g', include])
+
+    parts.extend([pattern, _normalize_output_path(path, repo_root_cache, cwd=cwd)])
+    return ' '.join(shlex.quote(part) for part in parts)
+
+
+def _parse_opencode_session_file_step(
+    session_data: dict,
+) -> list[SessionTaskNode]:
+    """Parses an opencode session export into structured request nodes."""
+    messages = session_data.get('messages', [])
+    default_kind = 'user'
+
+    request_markers: list[tuple[int, str]] = []
+    for idx, msg in enumerate(messages):
+        if msg.get('info', {}).get('role') != 'user':
+            continue
+        texts = [
+            part['text'].strip()
+            for part in msg.get('parts', [])
+            if part.get('type') == 'text' and part.get('text', '').strip()
+        ]
+        if not texts:
+            continue
+        text = '\n'.join(texts)
+        if request_markers and request_markers[-1][1] == text and idx - request_markers[-1][0] <= 2:
+            continue
+        request_markers.append((idx, text))
+
+    if not request_markers:
+        request_markers.append((-1, ''))
+
+    parsed_requests: list[SessionTaskNode] = []
+    repo_root_cache: dict[str, Optional[str]] = {}
+
+    for marker_idx, (request_idx, request_text) in enumerate(request_markers):
+        next_request_idx = (
+            request_markers[marker_idx + 1][0]
+            if marker_idx + 1 < len(request_markers)
+            else len(messages)
+        )
+        request_prompt = request_text.strip()
+
+        request_node = SessionTaskNode(kind=default_kind, prompt=request_prompt)
+        last_output_node = request_node
+
+        for msg in messages[request_idx + 1:next_request_idx]:
+            msg_info = msg.get('info', {})
+            parts = msg.get('parts', [])
+            path_info = msg_info.get('path')
+            current_cwd = (
+                path_info.get('cwd').strip()
+                if isinstance(path_info, dict) and isinstance(path_info.get('cwd'), str) and path_info['cwd'].strip()
+                else None
+            )
+
+            for part in parts:
+                part_type = part.get('type')
+
+                if part_type == 'text':
+                    text = part.get('text', '').strip()
+                    if text:
+                        commentary_node = _append_or_reuse_child(
+                            request_node,
+                            kind='commentary',
+                            prompt=text,
+                        )
+                        last_output_node = commentary_node
+
+                elif part_type == 'reasoning':
+                    text = part.get('text', '').strip()
+                    if text:
+                        _append_or_reuse_child(
+                            request_node,
+                            kind='thinking',
+                            prompt=text,
+                        )
+
+                elif part_type == 'tool':
+                    tool_name = part.get('tool')
+                    tool_state = part.get('state', {})
+                    if tool_state.get('status') == 'error':
+                        continue
+                    tool_input = tool_state.get('input', {})
+
+                    if tool_name == 'bash':
+                        command = tool_input.get('command')
+                        if isinstance(command, str) and command:
+                            _append_command_node(last_output_node, command)
+
+                    elif tool_name == 'read':
+                        command = _synthesize_opencode_read_command(
+                            tool_input, repo_root_cache, cwd=current_cwd,
+                        )
+                        if command:
+                            _append_command_node(last_output_node, command)
+
+                    elif tool_name == 'grep':
+                        command = _synthesize_opencode_grep_command(
+                            tool_input, repo_root_cache, cwd=current_cwd,
+                        )
+                        if command:
+                            _append_command_node(last_output_node, command)
+
+                    elif tool_name == 'glob':
+                        pattern = tool_input.get('pattern', '')
+                        if isinstance(pattern, str) and pattern:
+                            _append_command_node(last_output_node, f"glob {pattern}")
+
+                    elif tool_name == 'write':
+                        file_path = tool_input.get('filePath', '')
+                        if isinstance(file_path, str) and file_path:
+                            normalized_path = _normalize_output_path(
+                                file_path, repo_root_cache, cwd=current_cwd,
+                            )
+                            _append_command_node(
+                                last_output_node, f"write {shlex.quote(normalized_path)}",
+                            )
+
+                    elif tool_name == 'edit':
+                        file_path = tool_input.get('filePath', '')
+                        if isinstance(file_path, str) and file_path:
+                            normalized_path = _normalize_output_path(
+                                file_path, repo_root_cache, cwd=current_cwd,
+                            )
+                            _append_command_node(
+                                last_output_node, f"edit {shlex.quote(normalized_path)}",
+                            )
+
+                    elif tool_name == 'todowrite':
+                        checklist_items = _extract_opencode_checklist_items(tool_input)
+                        checklist_node = _build_checklist_node(checklist_items)
+                        if checklist_node is not None:
+                            request_node.children.append(checklist_node)
+
+                    elif tool_name == 'task':
+                        prompt = tool_input.get('prompt', '')
+                        description = tool_input.get('description', '')
+                        if not isinstance(prompt, str):
+                            prompt = ''
+                        if not isinstance(description, str):
+                            description = ''
+                        agent_prompt = description or prompt
+                        placeholder = SessionTaskNode(kind='subagent', prompt=agent_prompt)
+
+                        tool_output = tool_state.get('output', '')
+                        subagent_id = _extract_opencode_subagent_id(tool_output) if isinstance(tool_output, str) else None
+                        if subagent_id:
+                            placeholder.subagent_ids.append(subagent_id)
+
+                        request_node.children.append(placeholder)
+
+        parsed_requests.append(request_node)
+
+    return _compact_task_tree(parsed_requests)
+
+
 def _attach_inline_subagents(nodes: list[SessionTaskNode]) -> list[SessionTaskNode]:
     """Reparents inline child requests into previously spawned placeholders."""
     pending_placeholders: list[SessionTaskNode] = []
