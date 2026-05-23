@@ -408,9 +408,9 @@ def _extract_simple_command_ranges(
         return sed_ranges
 
     head = words[0]
-    if head in {'pwd', 'echo', 'printf', 'true', 'false', ':', 'find', 'which', 'ls', 'sort', 'wc'}:
+    if head in {'pwd', 'echo', 'printf', 'true', 'false', ':', 'find', 'which', 'ls', 'sort', 'wc', 'cd', 'mkdir', 'rm', 'cp', 'mv', 'cat', 'touch', 'chmod', 'chown', 'kill', 'ps', 'top', 'env', 'export', 'alias', 'type', 'file', 'uname', 'whoami', 'id', 'date', 'sleep', 'timeout', 'xargs', 'tee', 'source', '.', 'exit', 'clear', 'history'}:  # noqa: E501
         return []
-    if head in {'rg', 'grep', 'egrep', 'fgrep'}:
+    if head in {'rg', 'grep', 'egrep', 'fgrep', 'sqlite3', 'opencode', 'codex', 'jq'}:    
         return []
     if head in {'head', 'tail'} and all(
         word.startswith('-') or word.isdigit() for word in words[1:]
@@ -418,7 +418,7 @@ def _extract_simple_command_ranges(
         return []
     if head == 'command' and words[1:2] == ['-v']:
         return []
-    if head == 'git' and words[1:2] and words[1] in {'status', 'diff', 'rev-parse'}:
+    if head == 'git' and words[1:2] and words[1] in {'status', 'diff', 'rev-parse', 'log', 'add', 'commit', 'init', 'clone', 'checkout', 'branch', 'merge', 'push', 'pull', 'fetch', 'stash', 'tag', 'reset', 'config', 'remote', 'mv', 'rm'}:  # noqa: E501
         return []
     if head in {'test', '['}:
         return []
@@ -492,6 +492,8 @@ def _extract_shell_ranges(
 
 def _parse_command_ranges(command: str) -> Optional[list[str]]:
     """Parses a shell command into deterministic coverage ranges when possible."""
+    if command.startswith(('glob ', 'write ', 'edit ')):
+        return []
     try:
         parsed_command = _ShellParser(command).parse()
     except ValueError:
@@ -1569,6 +1571,15 @@ def parse_session_file_step(session_file_path: str) -> list[SessionTaskNode]:
         return _parse_opencode_session_file_step(session_data)
 
     session_data = _load_session_data(session_file_path)
+
+    if (
+        len(session_data) == 1
+        and isinstance(session_data[0], dict)
+        and 'info' in session_data[0]
+        and 'messages' in session_data[0]
+    ):
+        return _parse_opencode_session_file_step(session_data[0])
+
     session_format = _detect_session_format(session_data)
     if session_format == 'codex':
         return _parse_codex_session_file_step(session_data)
